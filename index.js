@@ -6,6 +6,11 @@ const EventEmitter = require('events').EventEmitter;
 const spawn = require('child_process').spawn;
 const path = require('path');
 const fs = require('fs');
+let debug = () => {};
+try {
+  debug = require('debug')('commander');
+} catch {
+}
 
 // @ts-check
 
@@ -104,6 +109,7 @@ class Command extends EventEmitter {
     this.options = [];
     this.parent = null;
     this._allowUnknownOption = false;
+    this._multiplesCommands = false;
     this._args = [];
     this.rawArgs = null;
     this._scriptPath = null;
@@ -115,6 +121,7 @@ class Command extends EventEmitter {
     this._actionHandler = null;
     this._executableHandler = false;
     this._executableFile = null; // custom name for executable
+    this._runtimeHandler = null; // handler for runtime created sub commands
     this._defaultCommandName = null;
     this._exitCallback = null;
     this._aliases = [];
@@ -397,7 +404,7 @@ class Command extends EventEmitter {
    */
 
   action(fn) {
-    const listener = (args) => {
+    const listener = (args, object) => {
       // The .action callback takes an extra parameter which is the command or options.
       const expectedArgsCount = this._args.length;
       const actionArgs = args.slice(0, expectedArgsCount);
@@ -411,7 +418,7 @@ class Command extends EventEmitter {
         actionArgs.push(args.slice(expectedArgsCount));
       }
 
-      const actionResult = fn.apply(this, actionArgs);
+      const actionResult = fn.call(this, { ...object, args: actionArgs, options: this.opts() });
       // Remember result in case it is async. Assume parseAsync getting called on root.
       let rootCommand = this;
       while (rootCommand.parent) {
@@ -435,11 +442,12 @@ class Command extends EventEmitter {
    * @api private
    */
 
-  _optionEx(config, flags, description, fn, defaultValue) {
+  _optionEx(config, flags = config.flags, description = config.description, fn = config.fn, defaultValue = config.defaultValue) {
     const option = new Option(flags, description);
     const oname = option.name();
     const name = option.attributeName();
     option.mandatory = !!config.mandatory;
+    debug('Adding option (%o) to command (%o)', name, this.name());
 
     // default as 3rd arg
     if (typeof fn !== 'function') {
@@ -477,6 +485,7 @@ class Command extends EventEmitter {
     // when it's passed assign the value
     // and conditionally invoke the callback
     this.on('option:' + oname, (val) => {
+      debug('option (%o) listener (%o) for command (%o)', oname, val, this._name);
       // coercion
       if (val !== null && fn) {
         val = fn(val, this._getOptionValue(name) === undefined ? defaultValue : this._getOptionValue(name));
@@ -545,8 +554,8 @@ class Command extends EventEmitter {
    *     // optional argument
    *     program.option('-c, --cheese [type]', 'add cheese [marble]');
    *
-   * @param {string} flags
-   * @param {string} description
+   * @param {string|Object} flags
+   * @param {string} [description]
    * @param {Function|*} [fn] - custom option processing function or default vaue
    * @param {*} [defaultValue]
    * @return {Command} `this` command for chaining
@@ -554,7 +563,8 @@ class Command extends EventEmitter {
    */
 
   option(flags, description, fn, defaultValue) {
-    return this._optionEx({}, flags, description, fn, defaultValue);
+    const options = typeof flags === 'object' ? flags : {};
+    return this._optionEx(options, flags, description, fn, defaultValue);
   };
 
   /**
@@ -584,6 +594,17 @@ class Command extends EventEmitter {
    */
   allowUnknownOption(arg) {
     this._allowUnknownOption = (arg === undefined) || arg;
+    return this;
+  };
+
+  /**
+   * Allow multiples commands separated by --.
+   *
+   * @param {Boolean} [arg] - if `true` or omitted
+   * @api public
+   */
+  withMultiplesCommands(arg) {
+    this._multiplesCommands = (arg === undefined) || arg;
     return this;
   };
 
@@ -863,6 +884,7 @@ class Command extends EventEmitter {
    * @api private
    */
   _dispatchSubcommand(commandName, operands, unknown) {
+    debug('dispatching (%o) with (%o) and (%o)', commandName, operands, unknown);
     const subCommand = this._findCommand(commandName);
     if (!subCommand) this._helpAndError();
 
@@ -887,11 +909,30 @@ class Command extends EventEmitter {
    * @return {Promise}
    */
 
-  parseCommand(operands = [], unknown = []) {
-    const parsed = this.parseOptions(unknown);
+  parseCommand(operands = [], unknown = [], isolated = false) {
+    debug('parsing command (%o) operands (%o) unknown (%o)', this.name(), operands, unknown);
+    const notParsed = [];
+    if (this._multiplesCommands && unknown.includes('--')) {
+      // split unknown commands by -- and parse then separated.
+      while (unknown.includes('--')) {
+        const dashIndex = unknown.lastIndexOf('--');
+        notParsed.unshift(unknown.slice(dashIndex + 1));
+        unknown = unknown.slice(0, dashIndex);
+      }
+    }
+
+    let parsed;
+    if (isolated) {
+      debug('deferring options parsing so the options will not be parsed by the parent');
+      parsed = { operands: [unknown.shift()], unknown };
+    } else {
+      parsed = this.parseOptions(unknown);
+    }
     operands = operands.concat(parsed.operands);
     unknown = parsed.unknown;
-    this.args = operands.concat(unknown);
+    debug('command parsed: operands (%o) unknown (%o)', operands, unknown);
+
+    this.args = operands.slice();
 
     this.emit('commandParsed:' + this.name(), this);
 
@@ -929,7 +970,7 @@ class Command extends EventEmitter {
           }
         });
 
-        this._actionHandler(args);
+        this._actionHandler(args, { operands, unknown });
         this.emit('command:' + this.name(), operands, unknown);
       } else if (operands.length) {
         if (this._findCommand('*')) {
@@ -945,6 +986,11 @@ class Command extends EventEmitter {
       } else {
         // fall through for caller to handle after calling .parse()
       }
+    }
+
+    while (notParsed.length > 0) {
+      const nextUnknown = notParsed.shift();
+      commandPromise = commandPromise.then(() => this.parseCommand([], nextUnknown, true));
     }
     return commandPromise;
   };
