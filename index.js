@@ -35,6 +35,7 @@ class Option {
       this.negate = this.long.startsWith('--no-');
     }
     this.defaultValue = undefined;
+    this.negateOption = false;
     this.defaultValueDescription = undefined;
     this.parseArg = undefined;
     this.hidden = false;
@@ -80,6 +81,20 @@ class Option {
       return `${this.description} (${extraInfo.join(', ')})`;
     }
     return this.description;
+  }
+
+  /**
+   * Whether the option allows negate value with prefix `--no-`.
+   *
+   * @param {boolean} allowNegateOption
+   * @return {Option}
+   * @api public
+   */
+
+  allowNegateOption(allowNegateOption) {
+    allowNegateOption = (allowNegateOption === undefined) || allowNegateOption;
+    this.negateOption = !this.negate && this.long && allowNegateOption;
+    return this;
   };
 
   /**
@@ -1233,7 +1248,7 @@ Read more on https://git.io/JJc0W`);
       activeVariadicOption = null;
 
       if (maybeOption(arg)) {
-        const option = this._findOption(arg);
+        let option = this._findOption(arg);
         // recognised option, call listener to assign value with possible custom processing
         if (option) {
           if (option.required) {
@@ -1252,6 +1267,12 @@ Read more on https://git.io/JJc0W`);
           }
           activeVariadicOption = option.variadic ? option : null;
           continue;
+        } else if (arg.startsWith('--no-')) {
+          option = this._findOption(arg.replace(/^--no-/, '--'));
+          if (option && option.negateOption) {
+            this.emit(`option:${option.name()}`, false);
+            continue;
+          }
         }
       }
 

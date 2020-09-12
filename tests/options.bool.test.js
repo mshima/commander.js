@@ -35,6 +35,13 @@ describe('boolean flag on program', () => {
     program.parse(['node', 'test', '--no-cheese']);
     expect(program.cheese).toBe(false);
   });
+
+  test('when implicit negatable boolean flag specified then value is false', () => {
+    const program = new commander.Command();
+    program.addOption(new commander.Option('--cheese', 'add cheese').allowNegateOption(true));
+    program.parse(['node', 'test', '--no-cheese']);
+    expect(program.cheese).toBe(false);
+  });
 });
 
 // boolean flag on command
